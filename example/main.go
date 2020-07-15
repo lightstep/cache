@@ -16,7 +16,7 @@ func main() {
 	c := cache.NewLoadingCache(load,
 		cache.WithMaximumSize(1000),
 		cache.WithExpireAfterAccess(10*time.Second),
-		cache.WithRefreshAfterWrite(60*time.Second),
+		cache.WithExpireAfterWrite(60*time.Second),
 	)
 
 	getTicker := time.Tick(10 * time.Millisecond)

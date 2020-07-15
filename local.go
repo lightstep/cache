@@ -3,6 +3,7 @@ package cache
 import (
 	"container/list"
 	"context"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,7 +29,7 @@ type localCache struct {
 	policyName        string
 	expireAfterAccess time.Duration
 	expireAfterWrite  time.Duration
-	refreshAfterWrite time.Duration
+	jitterFraction    float64
 
 	onInsertion Func
 	onRemoval   Func
@@ -207,8 +208,9 @@ func (c *localCache) processEntries() {
 }
 
 func (c *localCache) add(en *entry) {
-	en.accessed = currentTime()
-	en.updated = en.accessed
+	now := currentTime()
+	en.expireAfterAccessDeadline = now.Add(c.expireAfterAccess) // Not jittered, as this is how c.entries is ordered.
+	en.expireAfterWriteDeadline = now.Add(c.jitter(c.expireAfterWrite))
 
 	remEn := c.entries.add(en)
 	if c.onInsertion != nil {
@@ -251,7 +253,8 @@ func (c *localCache) remove(el *list.Element) {
 
 // hit moves the given element to the top of the entries list.
 func (c *localCache) hit(el *list.Element) {
-	getEntry(el).accessed = currentTime()
+	// Not jittered, as this is how c.entries is ordered.
+	getEntry(el).expireAfterAccessDeadline = currentTime().Add(c.expireAfterAccess)
 	c.entries.hit(el)
 }
 
@@ -318,7 +321,7 @@ func (c *localCache) expireEntries() {
 	if c.expireAfterAccess <= 0 {
 		return
 	}
-	expire := currentTime().Add(-c.expireAfterAccess)
+	now := currentTime()
 	remain := drainMax
 	c.entries.walk(func(ls *list.List) {
 		for ; remain > 0; remain-- {
@@ -328,10 +331,11 @@ func (c *localCache) expireEntries() {
 				break
 			}
 			en := getEntry(el)
-			if !en.accessed.Before(expire) {
+			if !en.expireAfterAccessDeadline.Before(now) {
 				// Can break since the entries list is sorted by access time
 				break
 			}
+			// The deadline is in the past; remove the entry.
 			c.remove(el)
 			c.stats.RecordEviction()
 		}
@@ -339,13 +343,23 @@ func (c *localCache) expireEntries() {
 }
 
 func (c *localCache) isExpired(en *entry, now time.Time) bool {
-	if c.expireAfterAccess > 0 && en.accessed.Before(now.Add(-c.expireAfterAccess)) {
+	if c.expireAfterAccess > 0 && en.expireAfterAccessDeadline.Before(now) {
 		return true
 	}
-	if c.expireAfterWrite > 0 && en.updated.Before(now.Add(-c.expireAfterWrite)) {
+	if c.expireAfterWrite > 0 && en.expireAfterWriteDeadline.Before(now) {
 		return true
 	}
 	return false
+}
+
+// jitter adds random jitter to the duration.
+//
+// This adds or subtracts time from the duration within a given jitter fraction.
+// For example for 10s and jitter 0.1, it will return a time within [9s, 11s])
+// Based on https://github.com/grpc-ecosystem/go-grpc-middleware/blob/b28fb2bb3547ce89f6a5cfe23c5445d1aa29d52b/util/backoffutils/backoff.go#L20.
+func (c *localCache) jitter(dur time.Duration) time.Duration {
+	multiplier := c.jitterFraction * (rand.Float64()*2 - 1)
+	return time.Duration(float64(dur) * (1 + multiplier))
 }
 
 // New returns a local in-memory Cache.
@@ -421,14 +435,6 @@ func WithExpireAfterWrite(d time.Duration) Option {
 	}
 }
 
-// WithRefreshAfterWrite returns an option to refresh a cache entry after the
-// given duration. This option is only applicable for LoadingCache.
-func WithRefreshAfterWrite(d time.Duration) Option {
-	return func(c *localCache) {
-		c.refreshAfterWrite = d
-	}
-}
-
 // WithStatsCounter returns an option which overrides default cache stats counter.
 func WithStatsCounter(st StatsCounter) Option {
 	return func(c *localCache) {
@@ -441,6 +447,19 @@ func WithStatsCounter(st StatsCounter) Option {
 func WithPolicy(name string) Option {
 	return func(c *localCache) {
 		c.policyName = name
+	}
+}
+
+// WithJitterFraction returns an option that can be used to apply
+// some amount of jitter to the option WithExpireAfterWrite.
+//
+// Example, given a jitter fraction of 0.1 (10%)
+// An a ExpireAfterWrite of 10 seconds,
+// the effective ExpireAfterWrite, on a per-item basis,
+// will be in [9, 11].
+func WithJitterFraction(jf float64) Option {
+	return func(c *localCache) {
+		c.jitterFraction = jf
 	}
 }
 

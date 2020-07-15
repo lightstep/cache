@@ -11,10 +11,24 @@ type entry struct {
 	key   Key
 	value Value
 
-	// accessed is the last time this entry was accessed.
-	accessed time.Time
-	// updated is the last time this entry was updated.
-	updated time.Time
+	// expireAfterAccessDeadline is the
+	// time that this entry should be removed, due
+	// to the ExpireAfterAccess config.
+	// This will be updated each time the entry is
+	// accessed.
+	// This is not jittered as the entries list is
+	// ordered by this.
+	expireAfterAccessDeadline time.Time
+
+	// expireAfterWriteDeadline is the
+	// time that this entry should be removed, due
+	// to the ExpireAfterWrite config.
+	// This will be updated each time the entry is
+	// accessed.
+	// It may be jittered, so the time may not align
+	// exactly with ExpireAfterWrite.
+	expireAfterWriteDeadline time.Time
+
 	// listID is ID of the list which this entry is currently in.
 	listID listID
 	// hash is the hash value of this entry key

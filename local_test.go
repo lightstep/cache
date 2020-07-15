@@ -314,6 +314,108 @@ func TestDoubleClose(t *testing.T) {
 	wg.Wait()
 }
 
+func TestExpireAfterWriteWithJitter(t *testing.T) {
+	jitterFraction := 0.10
+
+	loadCount := 0
+	loader := func(k Key) (Value, error) {
+		loadCount++
+		return loadCount, nil
+	}
+	wg := sync.WaitGroup{}
+	insFunc := func(Key, Value) {
+		wg.Done()
+	}
+	mockTime := newMockTime()
+	currentTime = mockTime.now
+	c := NewLoadingCache(loader, WithExpireAfterWrite(1*time.Second),
+		withInsertionListener(insFunc),
+		WithJitterFraction(jitterFraction),
+	)
+	defer c.Close()
+
+	wg.Add(1)
+	v, err := c.Get("refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+
+	if v.(int) != 1 || loadCount != 1 {
+		t.Fatalf("unexpected load count: %v, %v", v, loadCount)
+	}
+
+	jitterMagnitude := time.Duration(float64(1*time.Second) * jitterFraction)
+
+	// Do not expire the entry. Go as far as we can.
+	mockTime.add(1*time.Second - jitterMagnitude)
+	v, err = c.Get("refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if v.(int) != 1 || loadCount != 1 {
+		t.Fatalf("unexpected load count: %v, %v", v, loadCount)
+	}
+
+	// Now expire it.
+	mockTime.add(2 * jitterMagnitude)
+	wg.Add(1)
+	v, err = c.Get("refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	if v.(int) != 2 || loadCount != 2 {
+		t.Fatalf("unexpected load count: %v, %v", v, loadCount)
+	}
+}
+
+func TestExpireAfterAccessWithJitter(t *testing.T) {
+	jitterFraction := 0.20
+
+	wg := sync.WaitGroup{}
+	fn := func(k Key, v Value) {
+		wg.Done()
+	}
+	mockTime := newMockTime()
+	currentTime = mockTime.now
+	c := New(WithExpireAfterAccess(1*time.Second), WithRemovalListener(fn), WithJitterFraction(jitterFraction),
+		withInsertionListener(fn)).(*localCache)
+	defer c.Close()
+
+	wg.Add(1)
+	c.Put(1, 1)
+	wg.Wait()
+
+	jitterMagnitude := time.Duration(float64(1*time.Second) * jitterFraction)
+
+	mockTime.add(1*time.Second - jitterMagnitude)
+	wg.Add(2)
+	c.Put(2, 2)
+	c.Put(3, 3)
+	wg.Wait()
+	n := cacheSize(&c.cache)
+	if n != 3 {
+		wg.Add(n)
+		t.Fatalf("unexpected cache size: %d, want: %d", n, 3)
+	}
+
+	mockTime.add(2 * jitterMagnitude)
+	wg.Add(2)
+	c.Put(4, 4)
+	wg.Wait()
+	n = cacheSize(&c.cache)
+	wg.Add(n)
+	if n != 3 {
+		t.Fatalf("unexpected cache size: %d, want: %d", n, 3)
+	}
+	_, ok := c.GetIfPresent(1)
+	if ok {
+		t.Fatalf("unexpected entry status: %v, want: %v", ok, false)
+	}
+}
+
 func cacheSize(c *cache) int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
